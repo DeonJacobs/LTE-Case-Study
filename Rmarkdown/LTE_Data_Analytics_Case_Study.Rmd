@@ -1,0 +1,373 @@
+---
+title: "LTE Data Analytics Case Study"
+author: "Deon Jacobs"
+date: "03 September 2016"
+output: slidy_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+##Synopsis 
+
+This case study provides a brief overview of the methodology and reproducibility of analysing an LTE network. Care has been taken not to divulge specific confidential methodologies and information regarding the MTN network. 
+
+Within a mobile operator environment, many data sources exist from various applications and databases. Different departments use these sources to do their analytics and apply their domain knowledge to answer particular questions related to: 
+- Mobile network performance   
+- User experience   
+- Network capacity and coverage    
+- Segmentation and usage behaviour  
+
+R-code is used to read, manipulate and merge these various data source output files into one consolidated source file for analysis in Tableau. More in-depth inferential statistical analysis is performed in R where required. 
+
+###Hypothetical Marketing Question to be answered  
+- Will upgrade of LTE carrier bandwith in specific mainplace clusters result in revenue growth?
+
+##Data Sources of Interest
+
+To answer this hypothetical question, four data source outputs will be used and combined into one tidy data file for further analysis. 
+
+1. LTE Performance Statistics
+2. LTE Network Configuration
+3. BTS geographical Data
+4. LTE Device Penetration
+
+##LTE Performance Statistics
+R code reads, manipulates scheduled LTE performance statistics report from specific operator. Here basic performance metrics: data-volume and throughput are queried.
+
+```{r LTE Performance Stats, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+  
+  library(dplyr)
+  #set path where files are located
+  setwd("C:/Users/jacobs_d/Documents/Copy_folder/2016/Network Analytics")
+  
+  #input file names
+  lteTrafficFile <- "LTE_daily_traffic_v2.csv"
+  
+  #read daily per cell LTE traffic from file
+  lteRawTraffic <- read.csv(file.path("raw files",lteTrafficFile),skip=1,header = TRUE)
+  
+  #Rename collumn names
+  colnames(lteRawTraffic)[1] <- "date"
+  colnames(lteRawTraffic)[2] <- "cell"
+  colnames(lteRawTraffic)[3] <- "mainplace"
+  colnames(lteRawTraffic)[4] <- "siteid"
+  colnames(lteRawTraffic)[5] <- "dl_datavol"
+  colnames(lteRawTraffic)[6] <- "ul_datavol"
+  colnames(lteRawTraffic)[7] <- "total_datavol"
+  colnames(lteRawTraffic)[8] <- "bandwidth"
+  colnames(lteRawTraffic)[9] <- "dl_throughput"
+  colnames(lteRawTraffic)[10] <- "ul_throughput"
+  
+  #Convert date column to correct Data format
+  lteRawTraffic$date <- as.Date(lteRawTraffic$date, "%Y-%m-%d")
+  
+  #Aggregated traffic up to site level for each day if required for r-analysis
+  lteDailyTraffic <- lteRawTraffic %>%
+                     group_by(date,mainplace) %>%
+                     summarise(dl_datavol_sum = sum(dl_datavol,na.rm=TRUE), 
+                               ul_datavol_sum = sum(ul_datavol,na.rm=TRUE), 
+                               total_datavol_sum = sum(total_datavol,na.rm=TRUE),
+                               bandwidth = mean(bandwidth,na.rm=TRUE),
+                               dl_thrpt_avg = mean(dl_throughput,na.rm=TRUE),
+                               ul_thrpt_avg = mean(ul_throughput,na.rm=TRUE)
+                               )
+                  
+  #Write dataset to file
+  write.table(lteRawTraffic,file.path("script files","LTE_aggregated_daily_traffic.csv"),sep=",",row.names=FALSE)
+  head(lteRawTraffic)
+  
+```
+##LTE Network Config
+
+Three R code scripts are needed here:   
+1. Consolidation of entire access technology (GSM, UMTS, LTE) configuration per radio base station (BTS).   
+2. Merging of the per BTS configuration with geographical data to roll analysis up to marketing mainplace definition.   
+3. Merging the configuration and geographical consolidation with previous LTE "cleaned" statistical performance data.    
+
+
+### Consolidated radio access technology configuration merged with geopgraphical data 
+```{r Consolidated Network Config, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+  library(lubridate)
+  library(reshape)
+  #library(ROracle)
+  #con <- dbConnect(drv,"huawei_gsm","password$",dbname='stats')
+  
+  #set path where files are located
+  setwd("C:/Users/jacobs_d/Documents/Copy_folder/2016/Network Analytics")
+  
+  #input file names
+  gsmFile <- "TRX_COUNT_2G.csv"
+  wcdmaFile <- "UMTS_UARFCN.csv"
+  lteFile <- "LTE_BW_ALL.csv"
+  locationFile <- "Site_location_data_cluster.csv"
+  
+  #Load site location data
+  siteLocation <-read.csv(file.path("raw files",locationFile),header = TRUE)
+  
+  names(siteLocation) <- tolower(names(siteLocation))
+  
+  ##########################################################################################
+  ##LTE data manipulation
+  ##########################################################################################
+  #Load LTE BW config per cell
+  lteConfig <- read.csv(file.path("raw files",lteFile),header = TRUE)
+ 
+  #Generate Site column from file
+  newLteConfig <- separate(lteConfig,"CELLNAME", c("l","siteid","sector","num"),sep=c(1,6,7),convert=TRUE,remove=FALSE) %>%
+                  filter(l=="L" & EARFCNDL <= 1377 & EARFCNDL != 350) %>%
+                  select(-l,-num)
+  newLteConfig$CELLNAME <- as.character(newLteConfig$CELLNAME)
+  #Generate cellid column from LTE config dataframe
+  newLteConfig$siteid <-as.character(as.numeric(newLteConfig$siteid))
+  lteConf.s <- mutate(newLteConfig,cell = paste0(siteid,sector)) %>%
+               select(-sector) %>%
+               mutate(lte_sector = substr(CELLNAME,1,nchar(CELLNAME)-1)) %>%
+               select(-CELLNAME,-ULBANDWIDTH,-EARFCNUL) %>%
+               select(lte_sector,siteid:cell)
+                
+  lteConf.s$siteid <-as.numeric(lteConf.s$siteid)
+  
+  #change variable names to lower case
+  names(lteConf.s) <- tolower(names(lteConf.s))
+  
+  #Pivot earfcn colum
+  lteConf.s <- spread(lteConf.s, key=earfcndl, value=dlbandwidth)
+  
+  
+  colnames(lteConf.s)[7] <- "l_1800_3_5_10"
+  colnames(lteConf.s)[6] <- "l_2100_5"
+  colnames(lteConf.s)[5] <- "l_2100_15"
+ 
+  #Split LTE 1800 bandwidth assignments per column
+  lteConf.sp <- spread(lteConf.s,key=l_1800_3_5_10, value=l_1800_3_5_10)
+  
+  colnames(lteConf.sp)[7] <- "l_1800_3"
+  colnames(lteConf.sp)[8] <- "l_1800_5"
+  colnames(lteConf.sp)[9] <- "l_1800_10"
+  
+  lteConf.sp$l_2100_5[lteConf.sp$l_2100_5=="5000"] <- "1"
+  lteConf.sp$l_2100_15[lteConf.sp$l_2100_15=="15000"] <- "1"
+  lteConf.sp$l_1800_3[lteConf.sp$l_1800_3=="3000"] <- "1"
+  lteConf.sp$l_1800_5[lteConf.sp$l_1800_5=="5000"] <- "1"
+  lteConf.sp$l_1800_10[lteConf.sp$l_1800_10=="10000"] <- "1"
+  
+  lteConf.sp$l_2100_5 <-as.numeric(lteConf.sp$l_2100_5)
+  lteConf.sp$l_2100_15 <-as.numeric(lteConf.sp$l_2100_15)
+  lteConf.sp$l_1800_3 <-as.numeric(lteConf.sp$l_1800_3)
+  lteConf.sp$l_1800_5 <-as.numeric(lteConf.sp$l_1800_5)
+  lteConf.sp$l_1800_10 <-as.numeric(lteConf.sp$l_1800_10)
+  
+  ###########################################################################################
+  ##UMTS data manipulation
+  ###########################################################################################
+  #Load UMTS config per cell
+  umtsConfig <- read.csv(file.path("raw files",wcdmaFile),header = TRUE)
+   
+  newUmtsConfig <- separate(umtsConfig,"CELLNAME",c("siteid","sector"),sep="A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q",remove=FALSE,extra="merge",fill="right") %>%
+                   select(-sector,-UARFCNUL)    
+  newUmtsConfig$siteid <- as.numeric(newUmtsConfig$siteid)
+  names(newUmtsConfig)[names(newUmtsConfig)=="CELLNAME"] <- "cellid"
+  names(newUmtsConfig)[names(newUmtsConfig)=="UARFCNDL"] <- "carrier"
+  names(newUmtsConfig) <- tolower(names(newUmtsConfig))
+  newUmtsConfig$cellid <- as.character(newUmtsConfig$cellid)
+  umtsConf.s <- mutate(newUmtsConfig,cell= substr(cellid,1,nchar(cellid)-1)) %>%
+                select(-cellid)
+  #Pivot carrier column to have column view of each carrier assignment per sector
+  umtsConf.s <- spread(umtsConf.s, key=carrier, value=carrier) 
+                
+  colnames(umtsConf.s)[5] <- "u_3086"
+  colnames(umtsConf.s)[6] <- "u_10712"
+  colnames(umtsConf.s)[7] <- "u_10737"
+  colnames(umtsConf.s)[8] <- "u_10762"
+  umtsConf.s$u_3086[umtsConf.s$u_3086=="3086"] <- "1"
+  umtsConf.s$u_10762[umtsConf.s$u_10762=="10762"] <- "1"
+  umtsConf.s$u_10737[umtsConf.s$u_10737=="10737"] <- "1"
+  umtsConf.s$u_10712[umtsConf.s$u_10712=="10712"] <- "1"
+  
+  umtsConf.s$u_3086 <-as.numeric(umtsConf.s$u_3086)
+  umtsConf.s$u_10712 <-as.numeric(umtsConf.s$u_10712)
+  umtsConf.s$u_10737 <-as.numeric(umtsConf.s$u_10737)
+  umtsConf.s$u_10762 <-as.numeric(umtsConf.s$u_10762)
+
+  
+  ############################################################################################
+  ##GSM data manipulation
+  ############################################################################################
+  gsmConfig <- read.csv(file.path("raw files",gsmFile),header = TRUE)
+  gsmConf.st <- spread(gsmConfig,key=BAND, value=TRXCNT, convert=FALSE)
+  names(gsmConf.st)[names(gsmConf.st)==""] <- "remove"
+  
+  gsmConf.s <- select(gsmConf.st,-remove) 
+
+  gsmConf.s$GSM1800[is.na(gsmConf.s$GSM1800)] <- 0               
+  gsmConf.s$GSM900[is.na(gsmConf.s$GSM900)] <- 0
+  
+  names(gsmConf.s) <- tolower(names(gsmConf.s))
+  colnames(gsmConf.s)[2] <- "sector"
+  colnames(gsmConf.s)[5] <- "g_900_trx_cnt"
+  colnames(gsmConf.s)[4] <- "g_1800_trx_cnt"
+  #generate siteid column in GSM database
+  gsmConf.f <- separate(gsmConf.s,"sector",c("siteid","s"),sep="A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q",remove=FALSE,extra="merge",fill="right") %>%
+               select(-s)
+  gsmConf.f$siteid <-as.numeric(gsmConf.f$siteid)
+  
+  ############################################################################################
+  ##Generate a concatenated sector database between 3G and LTE
+  ############################################################################################
+  join3g4g <- full_join(umtsConf.s, lteConf.sp, by=c("siteid","cell","vendor"))
+  names(join3g4g)[names(join3g4g)=="cell"] <- "sector"
+  
+  ############################################################################################
+  ##Generate a concatenated sector database between LTE and 3G and 2G
+  ############################################################################################
+  sector2g3g4g <- full_join(join3g4g, gsmConf.f, by=c("siteid","sector","vendor"))
+  
+  sector2g3g4g$l_1800_3[is.na(sector2g3g4g$l_1800_3)] <- 0
+  sector2g3g4g$l_1800_5[is.na(sector2g3g4g$l_1800_5)] <- 0
+  sector2g3g4g$l_1800_10[is.na(sector2g3g4g$l_1800_10)] <- 0
+  sector2g3g4g$l_2100_5[is.na(sector2g3g4g$l_2100_5)] <- 0
+  sector2g3g4g$l_2100_15[is.na(sector2g3g4g$l_2100_15)] <- 0
+  sector2g3g4g$u_3086[is.na(sector2g3g4g$u_3086)] <- 0
+  sector2g3g4g$u_10712[is.na(sector2g3g4g$u_10712)] <- 0
+  sector2g3g4g$u_10737[is.na(sector2g3g4g$u_10737)] <- 0
+  sector2g3g4g$u_10762[is.na(sector2g3g4g$u_10762)] <- 0
+  sector2g3g4g$g_1800_trx_cnt[is.na(sector2g3g4g$g_1800_trx_cnt)] <- 0
+  sector2g3g4g$g_900_trx_cnt[is.na(sector2g3g4g$g_900_trx_cnt)] <- 0
+  
+  ############################################################################################
+  ## Generate site LTE, 3G, and 2G radio database
+  ############################################################################################
+  site2g3g4g <- group_by(sector2g3g4g,siteid,vendor) %>%
+                summarise(u_3086_sum = sum(u_3086),u_10712_sum = sum(u_10712),
+                          u_10737_sum = sum(u_10737), u_10762_sum = sum(u_10762),
+                          l_2100_15_sum = sum(l_2100_15), l_2100_5_sum = sum(l_2100_5),
+                          l_1800_3_sum = sum(l_1800_3), l_1800_5_sum = sum(l_1800_5), l_1800_10_sum = sum(l_1800_10), 
+                          g_1800_trx_sum = sum(g_1800_trx_cnt),g_900_trx_sum = sum(g_900_trx_cnt))
+                          
+  ############################################################################################
+  ##Generate a concatenated sector coordinate radio database file
+  ############################################################################################
+  sectorDBlocation <- left_join(sector2g3g4g,siteLocation, by=c("siteid"))  
+  
+  ############################################################################################
+  ##Generate a concatenated site coordinate radio database file
+  ############################################################################################
+  siteDBlocation <- left_join(site2g3g4g,siteLocation, by=c("siteid"))  
+  
+  #store sector database
+  write.table(sectorDBlocation,file.path("script files","GSM_UMTS_LTE_Sector_Data.csv"),sep=",",row.names=FALSE)
+  #store site database
+  write.table(siteDBlocation,file.path("script files","GSM_UMTS_LTE_Site_Data.csv"),sep=",",row.names=FALSE)
+  
+  head(siteDBlocation)
+```
+###Merge Network Configuration Data with LTE Performance Statistical Data
+```{r Merge Config with Stats, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+   
+  library(dplyr)
+  library(tidyr)
+  setwd("C:/Users/jacobs_d/Documents/Copy_folder/2016/Network Analytics")  
+  siteConfig <- "GSM_UMTS_LTE_Site_Data.csv"
+  
+  #########################################################################################################
+  ##Network configuration read and merge with LTE traffic 
+  #########################################################################################################
+  
+  #Read network config file from the correct sub folder
+  networkConfig <- read.csv(file.path("script files",siteConfig),header = TRUE)
+  
+  #Do right outer joint with network configuration
+  lteTrafficNetwork <- merge(x=networkConfig,y=lteRawTraffic,by="siteid",all.y=TRUE)
+  
+  #Drop columns of network config for UMTS and GSM as not related UMTS analysis
+  lteTrafficNetwork <- select(lteTrafficNetwork, -u_3086_sum,-u_10712_sum,-u_10737_sum,-u_10762_sum,-g_1800_trx_sum,-g_900_trx_sum)
+  
+  #Clean up Bandwidth values
+  lteTrafficNetwork <- lteTrafficNetwork %>% 
+                       mutate(BW = ifelse(bandwidth < 3, 0, 
+                                          ifelse(bandwidth >= 3 & bandwidth < 5, 3, 
+                                                 ifelse(bandwidth >=5 & bandwidth < 10,5,
+                                                        ifelse(bandwidth >=10 & bandwidth < 15,10,
+                                                               ifelse(bandwidth >=15 & bandwidth < 20,15,20)))))) %>%
+                       select(-bandwidth)
+  
+  head(lteTrafficNetwork)
+  
+```
+##Device Penetration Data
+The final step is to merge the LTE device pentration data source output file to the consolidated data set from above.
+
+```{r Merge with Device data, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+  library(dplyr)
+  library(tidyr)
+  setwd("C:/Users/jacobs_d/Documents/Copy_folder/2016/Network Analytics")   
+  deviceData <- "Most_cell_device_data.csv"
+  
+  #########################################################################################################
+  ##Device Report merge with LTE traffic and network configuration to produce final csv file for tableau 
+  #########################################################################################################
+  
+  #read daily per cell LTE traffic from file
+  deviceAnalysis <- read.csv(file.path("raw files",deviceData),header = TRUE)
+  
+  #change variable names to lower case
+  names(deviceAnalysis) <- tolower(names(deviceAnalysis))
+  
+  #merge lte traffic and network combined data frame with device analysis data (right outer join)
+  combinedLTE <- merge(x=deviceAnalysis,y=lteTrafficNetwork,by="siteid",all.y=TRUE)
+  
+  #Write csv file with config to appropriate folder
+  write.table(combinedLTE,file.path("script files","LTE_daily_traffic_with_Network_config.csv"),sep=",",row.names=FALSE)  
+  
+  head(combinedLTE$BW)
+  
+```
+##Inferential Analysis in R and Tableau to Answer Marketing Question 
+
+To answer the marketing question, a Tableau dashboard is developed from the consolidated file generated by r-scripts. These scripts can be automated, and consolidated data stored as files or within required database. This methodology ensures this investigation is reproducible and exactly documented. The consolidated data can be utilised for further trending as a sufficient historical set is achieved. 
+
+Inferential statistics are performed in R to test certain hypothesis in order to answer the question whether the LTE bandwidth upgrade can, in fact, increase revenue: 
+
+###Exploratory analysis by histogram 
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(dplyr)
+#Subset data for only 3,5,10 LTE carrier bandwidths, since most are configured on these three combinations
+subLTE <- combinedLTE[which(combinedLTE$BW >= 3 & combinedLTE$BW < 15), ]
+#Generate plot to show density histogram for the three LTE Carrier Bandwidths
+ggplot(subLTE, aes(x=total_datavol, color=BW, fill=BW)) + 
+geom_histogram(binwidth=2000) +
+coord_cartesian(xlim = c(0, 30000)) + 
+facet_grid(.~ BW) + theme_classic() +
+labs(title="LTE Data Volume per Carrier BW",x="Daily Mbyte", y = "Density") 
+
+```
+
+###Mean of Datavolume for each of the LTE Carrier Bandwidths:  
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+datVolMeanBW <- group_by(subLTE,BW) %>% summarise(datVolMean = mean(total_datavol,na.rm=TRUE))
+datVolMeanBW
+```
+
+###Test Null Hypothesis that bandwidth upgrade will improve revenue (data volume)
+Utilise the t-test function to calculate the 95% confidence interval. It is assumed that the data set follows a normal distribution, and the mean random variable over many simulations exhibits a constant variance.
+
+From the histogram, the t-test will be performed between 5MHz and 10MHz LTE carrier bandwidth exhibiting highest percentage samples as independent groups.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+sub.ttest <- subset(subLTE,subLTE$BW %in% c(5,10))
+t.test(total_datavol~BW,data=sub.ttest)
+```
+
+##Conclusion
+
+- Since the 95% confidence interval between the 5 and 10 MHz LTE carrier does not contain zero, and the p-value (probability of alternative to Null Hypothesis) is minute, its safe to say that revenue will increase with an increase in LTE BW. 
+- Tableau dashboard can now be utilised to understand where the best mainplace cluster would be to increase the LTE bandwidth from 5 to 10MHz. 
+
+

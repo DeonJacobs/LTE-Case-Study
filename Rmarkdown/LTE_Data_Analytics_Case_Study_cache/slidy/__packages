@@ -1,0 +1,6 @@
+base
+dplyr
+stringr
+tidyr
+lubridate
+reshape
